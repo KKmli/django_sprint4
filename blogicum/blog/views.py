@@ -3,6 +3,8 @@ from django.utils import timezone
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count
 from django.core.paginator import Paginator
+from django.contrib.auth import logout as auth_logout
+from django.views.decorators.csrf import csrf_exempt
 
 from .models import Post, Category, Comment, User
 from .forms import PostForm, ProfileEditForm, CommentForm
@@ -13,6 +15,20 @@ def get_paginator(request, items, num=10):
     paginator = Paginator(items, num)
     num_pages = request.GET.get('page')
     return paginator.get_page(num_pages)
+
+
+def annotate_posts_with_comments(post_queryset):
+    """
+    Аннотирует QuerySet постов количеством комментариев.
+    Добавляет сортировку по дате публикации.
+
+    Args:
+        post_queryset: QuerySet объектов Post
+
+    Returns:
+        QuerySet с аннотированным comment_count и сортировкой
+    """
+    return post_queryset.annotate(comment_count=Count('comments')).order_by('-pub_date')
 
 
 def get_annotated_posts(post_objects, show_all=False):
@@ -33,7 +49,15 @@ def get_annotated_posts(post_objects, show_all=False):
     else:
         posts = post_objects
 
-    return posts.annotate(comment_count=Count('comments')).order_by('-pub_date')
+    # Используем единую функцию для аннотации и сортировки
+    return annotate_posts_with_comments(posts)
+
+
+@csrf_exempt
+def simple_logout(request):
+    """Простой view для выхода из приложения blog."""
+    auth_logout(request)
+    return redirect('blog:index')
 
 
 def index(request):
@@ -48,19 +72,19 @@ def index(request):
 def post_detail(request, post_id):
     """Полное описание поста."""
     template = 'blog/detail.html'
-    
+
     # Базовый queryset с join'ами для оптимизации
     post_queryset = Post.objects.select_related('author', 'category', 'location')
-    
+
     if request.user.is_authenticated:
         # Для авторизованных: сначала получаем без ограничений
         post = get_object_or_404(post_queryset, id=post_id)
-        
+
         # Проверяем права на просмотр
         if post.author != request.user:
             # Для не-авторов проверяем все условия публикации
-            if not (post.is_published and 
-                    post.pub_date <= timezone.now() and 
+            if not (post.is_published and
+                    post.pub_date <= timezone.now() and
                     post.category.is_published):
                 # Если условия не выполнены - возвращаем 404
                 # Django использует handler404 из urls.py
@@ -82,10 +106,14 @@ def post_detail(request, post_id):
             ),
             id=post_id
         )
-    
+
+    # Аннотируем количество комментариев для отдельного поста
+    annotated_posts = annotate_posts_with_comments(Post.objects.filter(id=post_id))
+    annotated_post = annotated_posts.first() if annotated_posts.exists() else post
+
     comments = post.comments.order_by('created_at')
     form = CommentForm()
-    context = {'post': post, 'form': form, 'comments': comments}
+    context = {'post': annotated_post, 'form': form, 'comments': comments}
     return render(request, template, context)
 
 
